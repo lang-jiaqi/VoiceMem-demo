@@ -68,8 +68,9 @@ execution belongs to the corresponding `studio/core/utils/` component. Studio
 uses one prompt per purpose without language variants. `--lang` still selects
 ASR and Memory Space language; the memory library retains its own prompt inputs.
 
-The local Qwen3-0.6B router still assigns internal `fast`, `medium`, or `slow`
-labels after confirmed ASR. Missing default weights are downloaded into the
+The local Qwen3-0.6B classifier selects ordinary or deep reasoning after ASR.
+Studio combines that depth with VoiceMem memory eligibility into the existing
+`fast`, `medium`, or `slow` reply modes. Missing default weights are downloaded into the
 `studio/models/reply-router/Qwen3-0.6B` directory with visible progress.
 Explicit model paths remain caller-owned.
 
@@ -328,10 +329,10 @@ These stages answer different questions and keep separate state:
 | `deep` | Yes | Yes |
 
 The gate combines a closed backchannel vocabulary, high-precision lexical
-rules, and an embedding fallback. Its complete-utterance result is authoritative
-for reusable core consumers. In the Studio `llm_tts` composition, it is also a
-speculative retrieval hint; the post-ASR reply router owns the final decision to
-inject memory into the reply.
+rules, and an embedding fallback. Its complete-utterance result owns baseline
+memory eligibility, including in Studio `llm_tts`. The depth classifier cannot
+veto a Gate-approved memory turn. Deep reasoning can additionally request memory
+to preserve the existing `memory_cot` mode. Speaker privacy still takes priority.
 
 For deep turns, speculative classify/search starts while speech is still in
 progress. Query embedding work is shared within a search scope, and device
@@ -414,16 +415,21 @@ partial ASR remains transient UI state rather than a chat bubble. It may seed
 buffered speculative work, but that work is cancelled if speech resumes and
 cannot become an accepted reply before confirmation.
 
-After confirmation, the local reply router selects exactly one reply mode:
-`direct` (instant), `memory` (mem), or `memory_cot` (mem+cot). `direct` discards
-any speculative memory result. The memory modes reuse an eligible speculative
-result or complete retrieval before generation. A route change between an early
-snapshot and final ASR invalidates buffered early output.
+After confirmation, Studio combines the Gate and local reasoning classifier:
+ordinary reasoning with Gate-approved memory is `memory` (mem), ordinary reasoning
+without it is `direct` (instant), and deep reasoning is `memory_cot` (mem+cot).
+Only direct turns or privacy overrides discard speculative memory. A normal or
+unavailable depth classification cannot erase Gate-approved results. Memory
+modes reuse eligible speculative results or complete retrieval before generation.
+A route change between an early snapshot and final ASR invalidates buffered early output.
 
 One session-scoped `TurnTakingStateMachine` then chooses the handoff. Ready
 audio is released directly. An ordinary predicted wait may use a cached
-acknowledgement, while only `memory_cot` may request an LLM-generated work
-filler. First audio observations update the session estimate used by later
+acknowledgement, while `memory_cot` may request an LLM-generated work filler
+whenever main audio is not ready. Recent fast smalltalk cannot suppress this
+first slow-turn opportunity. Existing readiness races still cancel unplayed
+fillers if the main reply wins; the route does not guarantee a spoken filler.
+First audio observations update the session estimate used by later
 decisions. Main reply work runs into a `ReplySink` while either filler plays.
 For every emitted end-of-turn filler, the browser reports actual playback
 completion before that sink releases `answer_start` or main PCM. Generation
@@ -444,13 +450,18 @@ Studio system prompt
 + contextual directives
 ```
 
-Reply mode is one per-turn signal rather than an independent memory and thinking
-pair. The local router resolves explicit high-confidence policy cases first,
-then sends ambiguous turns with bounded recent Session Context to Qwen3-0.6B
-outside the WebSocket loop under the process Torch lock. The Turn Gate remains a
-speculative retrieval hint and cannot force the final route. Context is included
-in the router cache key, so identical follow-up text in different conversations
-does not reuse a stale decision. All router input uses the same policy and bounded context template.
+Reply mode remains one public per-turn signal, composed from two separate inputs:
+VoiceMem's existing Gate for memory eligibility, and Qwen3-0.6B for reasoning depth.
+The model receives current text plus up to four context messages sharing the
+existing 320-character history budget. It answers only whether deep reasoning
+is needed and does not receive memory-prefetch hints. Studio-specific topic,
+date and greeting regex shortcuts are not used. Inference remains off-loop
+under the process Torch lock. Depth decisions are cached by text and bounded
+context, independent of the Gate; changing memory eligibility recomposes the
+final route without rerunning depth. Invalid model output uses ordinary reasoning;
+model exceptions preserve Gate memory eligibility. The legacy class name and
+hint argument remain for caller compatibility, but that hint no longer
+participates in depth classification.
 Provider-neutral request options carry the required reasoning across async reply
 iteration: `direct` and `memory` use non-thinking generation, while `memory_cot`
 uses high effort. Reasoning content remains private and is never spoken.

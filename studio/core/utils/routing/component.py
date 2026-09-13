@@ -2,6 +2,7 @@
 import asyncio
 import time
 from studio.core.utils.reply_modes.initialize import DIRECT, thinking_router
+from studio.core.utils.reply_modes.component import FAST, MEDIUM, SLOW, ThinkingDecision
 from voicemem import gate
 from voicemem.memory_api import build_memory_context
 from studio.core.utils.contracts.component import Pending
@@ -31,19 +32,20 @@ class Routing:
 
     async def route_pending_thinking(self, pending: Pending, memory_vm=None,
                                      history=None) -> Pending:
-        """Select the authoritative instant, mem, or mem+cot route off-loop."""
+        """Combine VoiceMem memory eligibility with local reasoning depth off-loop."""
         if not self._THINKING_ROUTER_ON:
             return pending
         started = time.monotonic()
         memory_vm = memory_vm or self.vm
-        memory_prefetch_hint = gate.needs_memory(pending.route)
+        memory_required = gate.needs_memory(pending.route)
         try:
             decision = await thinking_router().classify_async(
-                pending.text, memory_prefetch_hint, history)
+                pending.text, history=history)
         except Exception as exc:
-            print(f"[thinking] router failed; using fast: {type(exc).__name__}: {exc}",
-                  flush=True)
-            return pending
+            print(f"[thinking] 深思判断不可用（{type(exc).__name__}），保留 VoiceMem 记忆资格", flush=True)
+            decision = ThinkingDecision(FAST, 'unavailable')
+        decision = ThinkingDecision(
+            SLOW if decision.level == SLOW else (MEDIUM if memory_required else FAST), decision.raw)
         classified = time.monotonic()
         memory_ms = 0.0
         pending.reply_mode = decision.reply_mode

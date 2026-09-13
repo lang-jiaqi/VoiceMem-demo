@@ -101,7 +101,7 @@ class TurnTakingStateMachine:
             return HandoffDecision(HandoffKind.DIRECT, "text_turn", wait)
         if main_audio_ready:
             return HandoffDecision(HandoffKind.DIRECT, "main_audio_ready", wait)
-        if reply_mode == MEMORY_COT and wait >= self.long_filler_after_s:
+        if reply_mode == MEMORY_COT:
             return HandoffDecision(HandoffKind.LLM_FILLER, "long_work", wait)
         if cached_ack_available and wait >= self.short_ack_after_s:
             return HandoffDecision(HandoffKind.CACHED_ACK, "reply_not_ready", wait)

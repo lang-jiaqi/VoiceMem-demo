@@ -435,6 +435,16 @@ class SpeakingStyleTests(unittest.TestCase):
 
 
 class TurnTakingTimingTests(unittest.IsolatedAsyncioTestCase):
+    def test_first_slow_turn_can_offer_work_filler_after_fast_smalltalk(self):
+        machine = TurnTakingStateMachine(initial_wait_s=.2)
+        self.assertIs(machine.decide_handoff(main_audio_ready=False, reply_mode='memory_cot',
+                                             cached_ack_available=False).kind, HandoffKind.LLM_FILLER)
+        for mode in ('direct', 'memory'):
+            self.assertIs(machine.decide_handoff(main_audio_ready=False, reply_mode=mode,
+                                                 cached_ack_available=False).kind, HandoffKind.DIRECT)
+        self.assertIs(machine.decide_handoff(main_audio_ready=True, reply_mode='memory_cot',
+                                             cached_ack_available=False).kind, HandoffKind.DIRECT)
+
     def test_state_machine_selects_handoff_from_readiness_and_reply_mode(self):
         machine = TurnTakingStateMachine(initial_wait_s=2.0)
         machine.commit_user_turn()

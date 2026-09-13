@@ -1,4 +1,4 @@
-"""Local three-way reply routing after final ASR."""
+"""Local reasoning-depth classification; VoiceMem owns memory eligibility."""
 from __future__ import annotations
 
 import asyncio
@@ -26,38 +26,6 @@ def _local_router_ready(path: Path) -> bool:
 
 _ROUTE_LABEL = re.compile(
     r"(即时|记忆|深思|fast|medium|slow)", re.IGNORECASE)
-_SLOW_FLOOR = re.compile(
-    r"(?:求|计算|算|解).{0,18}(?:积分|导数|微分方程)"
-    r"|(?:积分|导数|微分方程).{0,10}(?:怎么求|怎么算|推导|过程)"
-    r"|(?:证明|逐步推导)"
-    r"|\b(?:solve|calculate|derive|prove).{0,32}"
-    r"(?:integral|derivative|differential equation|proof)\b",
-    re.IGNORECASE,
-)
-_FAST_FLOOR = re.compile(
-    r"^(?:你好|您好|哈[喽啰罗]|嗨|早上好|中午好|下午好|晚上好|晚安|谢谢|再见)"
-    r"|(?:介绍一下你自己|你是谁)"
-    r"|(?:讲|说|编|写).{0,24}(?:故事|笑话)"
-    r"|^(?:hi|hello|hey|thanks|thank you|good morning|good evening|goodbye)\b"
-    r"|(?:introduce yourself|who are you|tell me .{0,24}(?:story|joke))",
-    re.IGNORECASE,
-)
-_MEMORY_FLOOR = re.compile(
-    r"(?:还记得|你记得|我(?:上次|上回|以前|之前)(?:说|提|聊|告诉|答应)过)"
-    r"|(?:上次|上回|以前|之前).{0,20}(?:说过|提过|聊过|喜欢|偏好|计划|决定)"
-    r"|(?:今天|明天|后天|周末|下周|下个月).{0,8}(?:安排|日程|计划|有约)"
-    r"|\b(?:remember|last time|previously|my schedule|my plans)\b",
-    re.IGNORECASE,
-)
-_FOLLOWUP = re.compile(
-    r"(?:这个|那个|那这个|然后|接着|继续|为什么|刚才|前面|上一个|比较一下|相比)"
-    r"|(?:那.{0,12}呢|还有呢|然后呢)"
-    r"|\b(?:this one|that one|continue|go on|why|earlier|previous one|compare)\b",
-    re.IGNORECASE,
-)
-
-
-
 @dataclass(frozen=True)
 class ThinkingDecision:
     """Normalized three-way reply route selected for one confirmed user turn."""
@@ -112,12 +80,11 @@ def _router_download_progress_class():
     return RouterDownloadProgress
 
 class QwenThinkingRouter:
-    """Lazy Qwen3-0.6B three-way reply router with serialized Torch inference.
+    """Classify ordinary versus deep reasoning with serialized local inference.
 
-    All input uses one policy and example bank. The model itself
-    runs in non-thinking mode and emits one short label. Calls are cached by final
-    ASR text, bounded recent history, and the prefetch hint so speculative and
-    confirmed paths share only context-compatible decisions.
+    The public class name is retained for existing callers. Memory eligibility
+    belongs to VoiceMem and is composed with depth by the Studio routing adapter.
+    Only text and bounded conversation context participate in depth caching.
     """
 
     def __init__(self, model: str | None = None, device: str | None = None) -> None:
@@ -134,7 +101,7 @@ class QwenThinkingRouter:
         self._load_lock = threading.Lock()
         self.history_messages = 4
         self.history_chars = 320
-        self._cache: dict[tuple[str, bool, str], ThinkingDecision] = {}
+        self._cache: dict[tuple[str, str], ThinkingDecision] = {}
 
     def _ensure_model_source(self) -> str:
         """Download the default router with visible progress when it is absent."""
@@ -215,6 +182,7 @@ class QwenThinkingRouter:
         remaining = max(0, getattr(self, "history_chars", 320))
         count = max(0, getattr(self, "history_messages", 4))
         selected = list(history or [])[-count:] if count else []
+        share = max(1, remaining // len(selected)) if selected else 0
         lines = []
         for message in reversed(selected):
             if remaining <= 0:
@@ -222,21 +190,19 @@ class QwenThinkingRouter:
             content = " ".join(str(message.get("content") or "").split())
             if not content:
                 continue
-            content = content[:remaining]
+            content = content[:min(remaining, share)]
             remaining -= len(content)
             role = role_names.get(str(message.get("role")), "上下文")
             lines.append(f"{role}: {content}")
         lines.reverse()
         history_text = "\n".join(lines) if lines else "无"
-        return (f"最近对话：\n{history_text}\n"
-                f"当前用户：{text.strip()}\n"
-                f"记忆预取提示：{'是' if prefetch_hint else '否'}")
+        return f"最近对话：\n{history_text}\n当前用户：{text.strip()}"
 
     def classify(self, text: str, memory_prefetch_hint: bool = False,
                  history=None) -> ThinkingDecision:
-        """Classify confirmed ASR text synchronously; callers run this off-loop."""
+        """Classify depth off-loop; the legacy memory hint cannot affect this decision."""
         prompt = self._context_prompt(text, history, memory_prefetch_hint)
-        key = (text, memory_prefetch_hint, prompt)
+        key = (text, prompt)
         cached = self._cache.get(key)
         if cached is not None:
             return cached
@@ -247,29 +213,15 @@ class QwenThinkingRouter:
             self._cache[key] = decision
             return decision
 
-        # These explicit math forms are product policy, not a topic heuristic.
-        # Keeping the floor deterministic prevents a small router from turning a
-        # requested derivation into an instant answer.
-        if _SLOW_FLOOR.search(text):
-            return remember(ThinkingDecision(SLOW, "policy-floor"))
-        if _FAST_FLOOR.search(text):
-            return remember(ThinkingDecision(FAST, "policy-floor"))
-        if _MEMORY_FLOOR.search(text):
-            return remember(ThinkingDecision(MEDIUM, "policy-floor"))
-        compact = "".join(char for char in text if char.isalnum())
-        if len(compact) <= 4 and not (_FOLLOWUP.search(text) and history):
-            return remember(ThinkingDecision(FAST, "short-fragment"))
-
         output = self._predict(
             SYSTEM,
             EXAMPLES,
             prompt,
         )
-        fallback = MEDIUM if memory_prefetch_hint else FAST
-        decision = parse_level(output, fallback)
-        if not _ROUTE_LABEL.search(output or ""):
-            print(f"[thinking] invalid router output {output!r}; fallback={fallback}",
-                  flush=True)
+        label = (output or '').strip().strip('。.!！')
+        if label not in {'是', '否'}:
+            print('[thinking] 深思判定输出无效，保持普通推理；不改变记忆资格', flush=True)
+        decision = ThinkingDecision(SLOW if label == '是' else FAST, raw=label)
         return remember(decision)
 
     async def classify_async(self, text: str, memory_prefetch_hint: bool = False,
@@ -279,8 +231,5 @@ class QwenThinkingRouter:
             self.classify, text, memory_prefetch_hint, history)
 
     def warmup(self) -> ThinkingDecision:
-        """Load weights and compile the short non-thinking generation path."""
-        # Use an intentionally ambiguous utterance so policy floors cannot skip
-        # the model load and push a multi-second cold start onto the first user.
+        """Load weights and prime depth classification before accepting input."""
         return self.classify("介绍一下向量数据库", False)
-

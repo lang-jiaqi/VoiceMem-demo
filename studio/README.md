@@ -138,6 +138,35 @@ Install the matching extra in its own environment; do not combine both extras.
 
 情绪识别使用共享的 SenseVoiceSmall CPU 实例，保留情绪标签，不再生成多模态情绪原因。
 
+## 回复路由与长垫话
+
+三档仍是 instant、mem、mem+cot，但不再由小模型独自决定是否使用记忆：
+
+| VoiceMem 判断需要记忆 | 小模型判断需要深思 | 最终模式 |
+| --- | --- | --- |
+| 否 | 否 | instant |
+| 是 | 否 | mem |
+| 任意 | 是 | mem+cot |
+
+记忆资格沿用 `voicemem/gate.py` 原有判断，复用已经完成的检索或补齐缺失检索。
+小模型只根据当前发言和最近 4 条消息（共 320 字符）回答“是否需要深思”，提示在
+`harness/reply_modes/policy.py`。Studio 不再额外按日期、问句或关键词硬编码路由。
+普通推理或小模型调用失败都不会否决 Gate 已批准的记忆；陌生人声纹仍不能访问主人记忆。
+原 Gate 和小模型都可能误判，但记忆与推理各自负责自己的部分，不再重复筛掉记忆。
+
+mem+cot 在正文音频尚未就绪时使用原有长垫话流程，不再被最近闲聊较快的耗时估计挡住。
+正文和垫话继续并行生成；正文先准备好就跳过垫话，垫话已经播放则等待它结束再放行正文。
+这不改变讲话途中的附和、未完句续话计时、TTS 切句或提前生成。
+选择 mem 不代表一定能查到日程：记忆库必须已有相关记录，没有记录时不能编造。
+
+```bash
+python -m unittest evals.test_thinking_router evals.test_dialogue_harness.TurnTakingTimingTests
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python -m evals.router_quality --device cuda:0 --assert-quality
+```
+
+后者仅测本地模型的深思分类，不访问记忆库；记忆资格的保留由前面的确定性回归验证。
+这些检查不能替代实际记忆召回、完整 GPU 负载下的延迟或真实听感验收。
+
 ## TTS 切句
 
 正文 TTS 使用两端共用的完整句优先切分：首段通常不再在短逗号分句处提交，
